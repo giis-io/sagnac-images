@@ -1,0 +1,110 @@
+name: publish-agent-runtime
+# Publishes ghcr.io/giis-io/sagnac-agent-runtime.
+#
+# Manual trigger only. The job runs on a single-use release runner, created for this job alone and destroyed
+# afterwards; its unique label is passed in the "runner" input. It never runs on shared or GitHub-hosted
+# runners. The "release" environment requires approval and only accepts main.
+#
+# Steps: reproducible build (images/agent-runtime/build.sh: two builds without cache, amd64 + arm64 index;
+# nothing is pushed if they differ from each other or from images/agent-runtime/release) -> push BY DIGEST,
+# then the version tag -> keyless cosign signature (identity: this file on refs/heads/main) -> CycloneDX 1.7
+# SBOM, attested and kept as a workflow artifact. Only GITHUB_TOKEN (packages: write) and this job's OIDC
+# token are used; no stored secret.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Unique label of the single-use release runner"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-agent-runtime
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ github.repository == 'giis-io/sagnac-images' && github.ref == 'refs/heads/main' && startsWith(inputs.runner, 'sagnac-release-') }}
+    runs-on: ${{ inputs.runner }}
+    environment: release
+    timeout-minutes: 50
+    permissions:
+      contents: read         # checkout
+      packages: write        # push to ghcr.io/giis-io/sagnac-agent-runtime
+      id-token: write        # keyless cosign signature (Fulcio), nothing else
+    env:
+      REPOSITORY: ghcr.io/giis-io/sagnac-agent-runtime
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pinned tools and registry login
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          scripts/install-tools.sh "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/docker"
+          printf '%s' "$TOKEN" | DOCKER_CONFIG="$RUNNER_TEMP/docker" docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Reproducible build and push by digest
+        id: image
+        run: |
+          set -eu
+          expected=$(images/agent-runtime/build.sh digest)
+          pushed=$(SAGNAC_BUILDER=sagnac-release images/agent-runtime/build.sh registry "$REPOSITORY")
+          echo "expected: $expected" ; echo "pushed:   $pushed"
+          [ "$pushed" = "$expected" ] || { echo "::error::pushed digest differs from images/agent-runtime/release"; exit 1; }
+          echo "ref=$REPOSITORY@$pushed" >> "$GITHUB_OUTPUT"
+
+      - name: Keyless cosign signature
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: cosign sign --yes "$REF"
+
+      - name: Attested CycloneDX 1.7 SBOM
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          set -eu
+          syft scan "registry:$REF" -q -o "cyclonedx-json@1.7=$RUNNER_TEMP/sbom.cdx.json"
+          cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" "$REF"
+
+      - name: Signature and attestation check
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-agent-runtime.yml@refs/heads/main
+        run: |
+          set -eu
+          cosign verify "$REF" --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          cosign verify-attestation "$REF" --type cyclonedx --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          echo "signature and SBOM attestation verified for $IDENTITY"
+
+      - name: SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-sagnac-agent-runtime
+          path: ${{ runner.temp }}/sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summary
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          {
+            echo "### sagnac-agent-runtime published and signed"
+            echo
+            echo "\`$REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove Docker configuration
+        if: always()
+        run: rm -rf "${RUNNER_TEMP:?}/docker"
