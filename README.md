@@ -7,6 +7,7 @@ CycloneDX SBOM attestation.
 | Image | Version | Platforms |
 |---|---|---|
 | `ghcr.io/giis-io/sagnac-agent-runtime` | `0.1.1` | `linux/amd64`, `linux/arm64` |
+| `ghcr.io/giis-io/sagnac-b5-outils` | `0.1.0` | `linux/amd64`, `linux/arm64` |
 
 ## sagnac-agent-runtime
 
@@ -69,13 +70,35 @@ images/agent-runtime/build.sh oci sagnac-agent-runtime.tar
 The script prints the index digest and fails if it differs from the one recorded in
 [`images/agent-runtime/release`](images/agent-runtime/release).
 
+## sagnac-b5-outils
+
+A tools image for the reliability and compliance labs, based on the same `python:3.13.16-slim` image
+(Debian trixie), pinned by digest. It adds three static binaries, downloaded from their official releases
+for the target platform and checked against their SHA-256 hashes ([`Dockerfile`](images/b5-outils/Dockerfile)):
+
+- `kubectl` v1.37.1;
+- `promtool` from Prometheus v3.13.4;
+- `syft` v1.54.1.
+
+Python has the standard library only. The image runs as the unprivileged user `65532:65532` and is
+compatible with the Kubernetes Pod Security `restricted` profile. Lab files are mounted read-only at run
+time; nothing is downloaded inside the running container.
+
+Pull, verify and rebuild it as above, with `sagnac-b5-outils`, the workflow `publish-b5-outils.yml` and
+`images/b5-outils/`:
+
+```sh
+docker pull ghcr.io/giis-io/sagnac-b5-outils@sha256:ea5dcdb513c516ba26761d2b6610bfa4c7f9176fa937273e801d16a7d5ed179b
+images/b5-outils/build.sh oci sagnac-b5-outils.tar
+```
+
 ## License
 
 The build files in this repository are distributed under the Apache License 2.0 ([`LICENSE`](LICENSE)).
 
 The images contain third-party software under its own licenses: the Python interpreter (PSF-2.0), Debian
-packages from the base image, and the Python packages listed above (mainly MIT, Apache-2.0 and
-BSD-3-Clause). The SBOM lists each component and its license.
+packages from the base image, the Python packages listed above (mainly MIT, Apache-2.0 and
+BSD-3-Clause), and kubectl, promtool and syft (Apache-2.0). The SBOM lists each component and its license.
 
 ## Security
 

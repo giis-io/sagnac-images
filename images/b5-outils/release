@@ -1,0 +1,3 @@
+# Version tag and expected index digest of the published image (build.sh refuses any other digest).
+version=0.1.0
+digest=sha256:ea5dcdb513c516ba26761d2b6610bfa4c7f9176fa937273e801d16a7d5ed179b
